@@ -1,0 +1,23 @@
+{
+  "processed": 743,
+  "labeled": 743,
+  "archived": 0,
+  "errors": 0,
+  "category_counts": {
+    "Finance": 192,
+    "Important": 354,
+    "Orders": 92,
+    "Auth": 78,
+    "Ads": 27
+  },
+  "actions": {
+    "labels_created": [
+      "Smart/Ads",
+      "Smart/Orders",
+      "Smart/Finance",
+      "Smart/Auth",
+      "Smart/Important"
+    ],
+    "emails_archived": 0
+  }
+}

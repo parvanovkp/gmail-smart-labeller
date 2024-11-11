@@ -1,0 +1,52 @@
+{
+  "Marketing": {
+    "description": "Promotional emails and newsletters",
+    "filters": [
+      "subject:(off OR save OR % OR deal OR newsletter)",
+      "from:(*marketing* OR *newsletter* OR *promotions*)"
+    ],
+    "suggested_action": "Skip Inbox/Archive"
+  },
+  "Orders": {
+    "description": "Active purchase communications",
+    "filters": [
+      "subject:(order OR tracking OR shipment OR delivered)",
+      "from:(*orders* OR *shipping*)"
+    ],
+    "suggested_action": "Keep in Inbox"
+  },
+  "Finance": {
+    "description": "Financial-related emails",
+    "filters": [
+      "category:finance"
+    ],
+    "suggested_action": "Keep in Inbox"
+  },
+  "Admin": {
+    "description": "Administrative emails",
+    "filters": [
+      "category:admin"
+    ],
+    "suggested_action": "Keep in Inbox"
+  },
+  "Work": {
+    "description": "Work-related emails",
+    "filters": [
+      "category:work"
+    ],
+    "suggested_action": "Keep in Inbox"
+  },
+  "Statistics": {
+    "total_processed": 100,
+    "total_categorized": 100,
+    "errors": 0,
+    "category_distribution": {
+      "Marketing": 73,
+      "Finance": 9,
+      "Admin": 4,
+      "Work": 11,
+      "Orders": 3
+    },
+    "marketing_percentage": 73.0
+  }
+}
