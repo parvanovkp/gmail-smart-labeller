@@ -2,207 +2,256 @@
 
 from dotenv import load_dotenv
 import os
+import sys
 from utils.auth import GmailAuthenticator
 from utils.gmail import GmailUtils
 from openai import OpenAI
 from tqdm import tqdm
 import json
 import argparse
+from typing import Dict, Optional, Set
 
 class EmailLabeler:
-    def __init__(self, skip_inbox_for_ads=False):
-        """
-        Initialize EmailLabeler
+    def __init__(self, config_path: str = 'config.json'):
+        """Initialize the email labeler with configuration"""
+        # Load configuration
+        self.config = self._load_config(config_path)
         
-        Args:
-            skip_inbox_for_ads (bool): If True, will remove INBOX label from ads
-                                     (effectively archiving them)
-        """
-        # Initialize Gmail with necessary permissions
+        # Initialize Gmail
         auth = GmailAuthenticator(scopes=['https://www.googleapis.com/auth/gmail.modify'])
         self.gmail_service = auth.get_gmail_service()
         self.gmail_utils = GmailUtils(self.gmail_service)
         
-        # Store inbox management preference
-        self.skip_inbox_for_ads = skip_inbox_for_ads
-        
-        # Load OpenAI
+        # Initialize OpenAI
         api_key = os.getenv('OPENAI_API_KEY')
+        if not api_key:
+            raise ValueError("OPENAI_API_KEY not found in environment variables")
         self.openai = OpenAI(api_key=api_key)
         
         # Initialize statistics
         self.stats = {
             'processed': 0,
             'labeled': 0,
-            'archived': 0,
             'errors': 0,
             'category_counts': {},
             'actions': {
                 'labels_created': [],
-                'emails_archived': 0
+                'existing_labels': [],
+                'failed_categorizations': []
             }
         }
 
-    def create_label_hierarchy(self):
-        """Create label hierarchy with clear structure"""
+    def _load_config(self, config_path: str) -> Dict:
+        """Load configuration from file"""
+        try:
+            if not os.path.exists(config_path):
+                raise FileNotFoundError(
+                    f"Configuration file not found at {config_path}. "
+                    "Please run discover_categories.py first."
+                )
+            
+            with open(config_path, 'r') as f:
+                config = json.load(f)
+            
+            # Validate configuration
+            required_keys = ['label_prefix', 'categories', 'classification_prompt']
+            if not all(key in config for key in required_keys):
+                raise ValueError("Invalid configuration file structure")
+            
+            print("\nLoaded categories:")
+            for category in config['categories']:
+                print(f"- {category}")
+            
+            return config
+            
+        except Exception as e:
+            print(f"Error loading configuration: {str(e)}")
+            sys.exit(1)
+
+    def create_label_structure(self) -> Dict[str, str]:
+        """Create Gmail label hierarchy based on configuration"""
         created_labels = {}
         
-        # Define label structure
-        labels = {
-            "Ads": "Promotional and marketing emails",
-            "Orders": "Purchase and delivery related",
-            "Finance": "Banking and financial communications",
-            "Auth": "Login and security notifications",
-            "Important": "Priority communications"
-        }
-        
-        # Create main Smart folder
-        smart_label = self.gmail_utils.create_label("Smart")
-        if smart_label:
-            print("Created main 'Smart' label")
-            
-            # Create subcategories
-            for category, description in labels.items():
-                label = self.gmail_utils.create_label(category, parent_label_id="Smart")
-                if label:
-                    created_labels[category] = label['id']
-                    self.stats['actions']['labels_created'].append(f"Smart/{category}")
-                    print(f"Created label: Smart/{category}")
-        
-        return created_labels
-
-    def categorize_email(self, email_content):
-        """Categorize email with strict rules"""
-        prompt = f"""
-        Categorize this email into EXACTLY ONE of these categories:
-        - Ads (ANY promotional content, newsletters, marketing, deals, unless about an active order)
-        - Orders (purchase confirmations, shipping updates, delivery notifications)
-        - Finance (banking, bills, payments, financial statements)
-        - Auth (login confirmations, 2FA codes, security alerts)
-        - Important (anything that doesn't fit above but needs attention)
-
-        Strict rules:
-        1. If it's promotional/marketing, it MUST be "Ads" even if from a company you buy from
-        2. Only use "Orders" for actual purchase communications
-        3. "Auth" is for automatic system notifications about logins/security
-        4. "Finance" is strictly for money-related communications
-        5. If unsure between Ads and something else, prefer Ads
-
-        Email:
-        From: {email_content.get('from', 'Unknown')}
-        Subject: {email_content.get('subject', 'No Subject')}
-        Body excerpt: {email_content.get('body', '')[:300]}...
-
-        Response format: Just the category name, nothing else.
-        """
-
         try:
+            # Create main Smart label
+            main_label = self.gmail_utils.create_label(self.config['label_prefix'])
+            if main_label:
+                print(f"\nCreated/Found main '{self.config['label_prefix']}' label")
+                self.stats['actions']['existing_labels'].append(main_label['id'])
+                
+                # Create category labels
+                for category in self.config['categories']:
+                    label = self.gmail_utils.create_label(
+                        category, 
+                        parent_label_id=self.config['label_prefix']
+                    )
+                    if label:
+                        created_labels[category] = label['id']
+                        action = 'Found' if label['id'] in self.stats['actions']['existing_labels'] else 'Created'
+                        print(f"{action} label: {self.config['label_prefix']}/{category}")
+                        
+                        if action == 'Created':
+                            self.stats['actions']['labels_created'].append(
+                                f"{self.config['label_prefix']}/{category}"
+                            )
+            
+            return created_labels
+            
+        except Exception as e:
+            print(f"Error creating label structure: {str(e)}")
+            return {}
+
+    def categorize_email(self, email_content: Dict) -> Optional[str]:
+        """Categorize email using OpenAI"""
+        try:
+            # Prepare category descriptions for prompt
+            category_descriptions = []
+            for cat, details in self.config['categories'].items():
+                description = (
+                    f"{cat}:\n"
+                    f"  Description: {details['description']}\n"
+                    f"  Examples: {', '.join(details['examples'])}\n"
+                    f"  Priority: {details['priority']}\n"
+                    f"  Rules: {', '.join(details['rules'])}"
+                )
+                category_descriptions.append(description)
+            
+            # Format the classification prompt
+            prompt = self.config['classification_prompt'].format(
+                categories='\n'.join(category_descriptions),
+                sender=email_content.get('from', 'Unknown'),  # Changed from 'from_' to 'sender'
+                subject=email_content.get('subject', 'No Subject'),
+                body=email_content.get('body', '')[:300]
+            )
+
             response = self.openai.chat.completions.create(
-                model="gpt-4o",
+                model="gpt-3.5-turbo",
                 messages=[
-                    {"role": "system", "content": "You are a strict email categorizer focused on separating ads from important content."},
+                    {"role": "system", "content": "You are an email categorization assistant. Return ONLY the category name."},
                     {"role": "user", "content": prompt}
                 ],
                 temperature=0.0
             )
-            return response.choices[0].message.content.strip()
+            
+            category = response.choices[0].message.content.strip()
+            if category not in self.config['categories']:
+                self.stats['actions']['failed_categorizations'].append({
+                    'email': {
+                        'from': email_content.get('from'),
+                        'subject': email_content.get('subject')
+                    },
+                    'suggested_category': category
+                })
+                return None
+            return category
+            
         except Exception as e:
             print(f"\nError in categorization: {str(e)}")
             return None
 
-    def process_inbox(self, max_emails=None, dry_run=False):
-        """
-        Process and label emails in inbox with pagination support
-        
-        Args:
-            max_emails (int): Maximum number of emails to process (None for all)
-            dry_run (bool): If True, only simulate actions without making changes
-        """
+    def process_inbox(self, max_emails: Optional[int] = None) -> None:
+        """Process and label emails in inbox"""
         try:
-            print(f"\nStarting email processing{' (DRY RUN)' if dry_run else ''}:")
-            print(f"{'✓' if self.skip_inbox_for_ads else '✗'} Archive ads")
-            print(f"Will process {max_emails if max_emails else 'all'} emails\n")
+            print("\nInitializing Smart Labeler...")
             
-            # Create labels (unless dry run)
-            labels = self.create_label_hierarchy() if not dry_run else {}
+            # Create label structure
+            labels = self.create_label_structure()
+            if not labels:
+                raise Exception("Failed to create label structure")
             
-            # Initialize pagination variables
-            processed_count = 0
+            # Get existing labeled messages to avoid duplicates
+            labeled_messages: Set[str] = set()
+            print("\nGetting existing labeled messages...")
+            for label_id in labels.values():
+                messages = self.gmail_utils.get_messages_with_label(label_id)
+                labeled_messages.update(messages)
+            print(f"Found {len(labeled_messages)} already labeled messages")
+            
+            # Process emails with pagination
+            processed = 0
             page_token = None
             
             while True:
-                # Get next batch of emails
+                # Get batch of emails
                 results = self.gmail_service.users().messages().list(
                     userId='me',
                     labelIds=['INBOX'],
-                    maxResults=min(500, max_emails - processed_count if max_emails else 500),
+                    maxResults=min(
+                        self.config.get('batch_size', 500),
+                        max_emails - processed if max_emails else self.config.get('batch_size', 500)
+                    ),
                     pageToken=page_token
                 ).execute()
                 
                 messages = results.get('messages', [])
                 if not messages:
-                    print("No more messages found.")
+                    print("No more messages to process.")
                     break
                 
-                # Update progress bar total for this batch
-                with tqdm(total=len(messages), desc=f"Processing emails (batch {processed_count + 1}-{processed_count + len(messages)})") as pbar:
-                    # Process emails in current batch
+                # Filter out already labeled messages
+                messages = [msg for msg in messages if msg['id'] not in labeled_messages]
+                
+                # Process batch
+                with tqdm(total=len(messages), 
+                         desc=f"Processing emails {processed + 1}-{processed + len(messages)}") as pbar:
                     for message in messages:
                         try:
+                            # Skip if already labeled
+                            if message['id'] in labeled_messages:
+                                continue
+                            
                             # Get email content
                             email_content = self.gmail_utils.get_email_content(message['id'])
                             if not email_content:
                                 self.stats['errors'] += 1
                                 continue
                             
-                            # Categorize
+                            # Categorize email
                             category = self.categorize_email(email_content)
                             if not category:
                                 self.stats['errors'] += 1
                                 continue
                             
-                            # Update stats
-                            self.stats['processed'] += 1
-                            self.stats['category_counts'][category] = self.stats['category_counts'].get(category, 0) + 1
-                            
-                            if not dry_run:
-                                # Apply label
-                                if category in labels:
-                                    if self.gmail_utils.apply_label(message['id'], labels[category]):
-                                        self.stats['labeled'] += 1
+                            # Apply label
+                            if category in labels:
+                                # Remove any existing Smart labels first
+                                for label_id in labels.values():
+                                    self.gmail_utils.remove_label(message['id'], label_id)
                                 
-                                # Handle inbox skipping for ads
-                                if self.skip_inbox_for_ads and category == "Ads":
-                                    if self.gmail_utils.remove_label(message['id'], 'INBOX'):
-                                        self.stats['archived'] += 1
-                                        self.stats['actions']['emails_archived'] += 1
+                                # Apply new label
+                                if self.gmail_utils.apply_label(message['id'], labels[category]):
+                                    self.stats['labeled'] += 1
+                                    self.stats['category_counts'][category] = \
+                                        self.stats['category_counts'].get(category, 0) + 1
+                                    labeled_messages.add(message['id'])
                             
+                            self.stats['processed'] += 1
                             pbar.update(1)
-                            processed_count += 1
+                            processed += 1
                             
-                            # Check if we've reached max_emails
-                            if max_emails and processed_count >= max_emails:
-                                print(f"\nReached maximum number of emails to process ({max_emails})")
-                                return
+                            # Check if reached max_emails
+                            if max_emails and processed >= max_emails:
+                                print(f"\nReached maximum number of emails ({max_emails})")
+                                break
                             
                         except Exception as e:
-                            print(f"\nError processing message {message['id']}: {str(e)}")
+                            print(f"\nError processing message: {str(e)}")
                             self.stats['errors'] += 1
                             pbar.update(1)
                 
-                # Check for next page
+                # Get next page token
                 page_token = results.get('nextPageToken')
-                if not page_token:
+                if not page_token or (max_emails and processed >= max_emails):
                     break
             
-            # Save statistics
+            # Save final statistics
             self._save_stats()
             
         except Exception as e:
             print(f"Error processing inbox: {str(e)}")
 
-    def _save_stats(self):
-        """Save detailed processing statistics"""
+    def _save_stats(self) -> None:
+        """Save processing statistics"""
         stats_file = 'labeling_stats.json'
         try:
             with open(stats_file, 'w') as f:
@@ -212,26 +261,29 @@ class EmailLabeler:
             # Print summary
             print("\nProcessing Summary:")
             print(f"Processed: {self.stats['processed']} emails")
-            print(f"Labeled: {self.stats['labeled']} emails")
-            print(f"Archived: {self.stats['archived']} ads")
+            print(f"Successfully labeled: {self.stats['labeled']} emails")
             print(f"Errors: {self.stats['errors']}")
             print("\nCategory Distribution:")
             for category, count in self.stats['category_counts'].items():
-                print(f"{category}: {count}")
+                print(f"{category}: {count} ({count/self.stats['labeled']*100:.1f}%)")
+            
+            if self.stats['actions']['failed_categorizations']:
+                print(f"\nWarning: {len(self.stats['actions']['failed_categorizations'])} emails had categorization issues")
+                print("Check labeling_stats.json for details")
                 
         except Exception as e:
             print(f"\nError saving statistics: {str(e)}")
 
 def main():
-    parser = argparse.ArgumentParser(description='Process and label Gmail inbox')
+    parser = argparse.ArgumentParser(description='Label emails based on discovered categories')
     parser.add_argument('--max-emails', type=int, help='Maximum number of emails to process')
-    parser.add_argument('--archive-ads', action='store_true', help='Archive ads (remove from inbox)')
-    parser.add_argument('--dry-run', action='store_true', help='Simulate without making changes')
+    parser.add_argument('--config', type=str, default='config.json',
+                       help='Path to configuration file')
     args = parser.parse_args()
     
     load_dotenv()
-    labeler = EmailLabeler(skip_inbox_for_ads=args.archive_ads)
-    labeler.process_inbox(max_emails=args.max_emails, dry_run=args.dry_run)
+    labeler = EmailLabeler(config_path=args.config)
+    labeler.process_inbox(max_emails=args.max_emails)
 
 if __name__ == "__main__":
     main()

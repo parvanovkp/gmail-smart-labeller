@@ -1,23 +1,27 @@
 {
-  "processed": 743,
-  "labeled": 743,
-  "archived": 0,
+  "processed": 792,
+  "labeled": 792,
   "errors": 0,
   "category_counts": {
-    "Finance": 192,
-    "Important": 354,
-    "Orders": 92,
-    "Auth": 78,
-    "Ads": 27
+    "Professional Networking": 258,
+    "Financial Transactions": 260,
+    "Newsletters and Updates": 57,
+    "Account Management": 131,
+    "Reminders and Calendars": 11,
+    "Package and Order Updates": 75
   },
   "actions": {
     "labels_created": [
-      "Smart/Ads",
-      "Smart/Orders",
-      "Smart/Finance",
-      "Smart/Auth",
-      "Smart/Important"
+      "Smart/Financial Transactions",
+      "Smart/Account Management",
+      "Smart/Professional Networking",
+      "Smart/Package and Order Updates",
+      "Smart/Newsletters and Updates",
+      "Smart/Reminders and Calendars"
     ],
-    "emails_archived": 0
+    "existing_labels": [
+      "Label_55"
+    ],
+    "failed_categorizations": []
   }
 }

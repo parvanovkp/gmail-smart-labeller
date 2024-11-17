@@ -1,0 +1,40 @@
+{
+  "total_emails": 792,
+  "analyzed": 792,
+  "errors": 0,
+  "category_counts": {},
+  "patterns": {
+    "senders": {
+      "paypal.com\" <service": 97,
+      "ealerts.bankofamerica.com>": 83,
+      "linkedin.com>": 70,
+      "email.informeddelivery.usps.com>": 40,
+      "invictusgrowth.com>": 28,
+      "oracle.com>": 26,
+      "accounts.google.com>": 22,
+      "account.xcelenergy.com>": 21,
+      "jobs.microsoft.com>": 19,
+      "robinhood.com>": 15
+    },
+    "subjects": {
+      "payment": 90,
+      "receipt": 60,
+      "alert": 60,
+      "account": 51,
+      "order": 51,
+      "update": 28,
+      "confirm": 23,
+      "security": 22,
+      "reminder": 11,
+      "invitation": 10
+    },
+    "content_types": {
+      "transaction": 394,
+      "authentication": 297,
+      "social": 235,
+      "notification": 168,
+      "newsletter": 140,
+      "calendar": 61
+    }
+  }
+}
