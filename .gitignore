@@ -5,6 +5,7 @@
 credentials/*
 !credentials/credentials.template.json
 token.pickle
+.gmail-smart-labeler/    # Add this line for new user config directory
 
 # Python
 __pycache__/

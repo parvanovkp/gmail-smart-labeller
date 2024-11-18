@@ -1,0 +1,25 @@
+categories:
+  financial:
+    description: Emails related to financial transactions and alerts.
+    priority: high
+  social-network:
+    description: Communications from social networking platforms.
+    priority: medium
+  security-alerts:
+    description: Notifications regarding account security and authentication.
+    priority: high
+  job-opportunities:
+    description: Emails related to job postings and career updates.
+    priority: medium
+  newsletters:
+    description: Regular updates and newsletters from subscribed services.
+    priority: low
+  order-confirmations:
+    description: Emails confirming purchases and order details.
+    priority: medium
+  event-invitations:
+    description: Invitations to events and calendar notifications.
+    priority: low
+  service-updates:
+    description: Updates and alerts from service providers.
+    priority: medium

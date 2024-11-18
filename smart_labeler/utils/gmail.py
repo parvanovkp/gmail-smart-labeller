@@ -1,17 +1,21 @@
-# src/utils/gmail.py
-
 from base64 import urlsafe_b64decode
 import email
 import json
 from typing import Dict, Optional, Set, List
+from googleapiclient.discovery import Resource
+from googleapiclient.errors import HttpError
 
 class GmailUtils:
-    def __init__(self, service):
+    def __init__(self, service: Resource):
+        """Initialize Gmail utilities
+        
+        Args:
+            service: Authenticated Gmail API service resource
+        """
         self.service = service
 
-    def get_email_content(self, message_id: str) -> Optional[Dict]:
-        """
-        Get email content with robust error handling
+    def get_email_content(self, message_id: str) -> Optional[Dict[str, str]]:
+        """Get email content with robust error handling
         
         Args:
             message_id: The ID of the message to retrieve
@@ -26,7 +30,6 @@ class GmailUtils:
                 format='full'
             ).execute()
 
-            # Initialize email data
             email_data = {
                 'id': message_id,
                 'subject': 'No Subject',
@@ -34,7 +37,6 @@ class GmailUtils:
                 'body': 'No Content'
             }
 
-            # Get headers
             headers = message.get('payload', {}).get('headers', [])
             for header in headers:
                 name = header.get('name', '').lower()
@@ -43,26 +45,21 @@ class GmailUtils:
                 elif name == 'from':
                     email_data['from'] = header.get('value', 'No Sender')
 
-            # Get body
             payload = message.get('payload', {})
             body = ''
 
-            # Function to extract body from payload
-            def get_body_from_payload(part):
+            def get_body_from_payload(part: Dict) -> str:
                 if 'body' in part and 'data' in part['body']:
                     return urlsafe_b64decode(part['body']['data']).decode('utf-8', errors='ignore')
                 return ''
 
-            # Check for multipart
             if 'parts' in payload:
-                # First try to find text/plain
                 for part in payload['parts']:
                     mime_type = part.get('mimeType', '')
                     if 'text/plain' in mime_type:
                         body = get_body_from_payload(part)
                         break
                 
-                # If no text/plain, try text/html
                 if not body:
                     for part in payload['parts']:
                         mime_type = part.get('mimeType', '')
@@ -70,14 +67,16 @@ class GmailUtils:
                             body = get_body_from_payload(part)
                             break
             else:
-                # Single part message
                 body = get_body_from_payload(payload)
 
             email_data['body'] = body if body else 'No Content'
             return email_data
 
+        except HttpError as e:
+            print(f"Gmail API error getting message {message_id}: {str(e)}")
+            return None
         except Exception as e:
-            print(f"Error getting email content for message {message_id}: {str(e)}")
+            print(f"Error processing message {message_id}: {str(e)}")
             return None
 
     def create_label(self, name: str, parent_label_id: Optional[str] = None) -> Optional[Dict]:
