@@ -6,9 +6,11 @@ from openai import OpenAI
 from typing import Dict, Optional
 from .utils.auth import GmailAuthenticator
 from .utils.gmail import GmailUtils
+from tqdm import tqdm
 
 CONFIG_DIR = Path(__file__).parent / 'config'
 CONFIG_PATH = CONFIG_DIR / 'categories.yaml'
+PARENT_LABEL = "Smart Labels"
 
 class GmailLabeler:
     def __init__(self):
@@ -28,6 +30,13 @@ class GmailLabeler:
         
         # Ensure config directory exists
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        
+        # Ensure parent label exists
+        self._ensure_parent_label_exists()
+
+    def _ensure_parent_label_exists(self):
+        """Create the parent Smart Labels label if it doesn't exist"""
+        self.gmail_utils.get_or_create_label(PARENT_LABEL)
 
     def analyze(self) -> None:
         """Analyze inbox and generate category suggestions"""
@@ -59,7 +68,8 @@ class GmailLabeler:
         # Get sample of recent emails
         messages = self.gmail_utils.get_all_messages(max_results=500)
         
-        for msg_id in messages:
+        print("📊 Analyzing email patterns...")
+        for msg_id in tqdm(messages, desc="Processing emails", unit="email"):
             email = self.gmail_utils.get_email_content(msg_id)
             if email:
                 # Analyze sender
@@ -125,7 +135,7 @@ class GmailLabeler:
 
         try:
             response = self.openai.chat.completions.create(
-                model="gpt-4o",
+                model="gpt-4-0125-preview",
                 messages=[
                     {"role": "system", "content": "You are a YAML generator. Output only valid YAML without markdown formatting or code blocks."},
                     {"role": "user", "content": prompt}
@@ -164,10 +174,15 @@ class GmailLabeler:
                 config = yaml.safe_load(f)
 
             # Generate classification prompt
-            prompt = self._generate_prompt(config)
+            prompt_template = self._generate_prompt(config)
 
             # Get unlabeled emails
             unlabeled = self._get_unlabeled_emails()
+            total_emails = len(unlabeled)
+
+            if total_emails == 0:
+                print("✨ No new emails to label!")
+                return {"processed": 0, "labeled": 0, "errors": 0}
 
             stats = {
                 'processed': 0,
@@ -175,19 +190,27 @@ class GmailLabeler:
                 'errors': 0
             }
 
-            # Process emails in batches
-            for email_id in unlabeled:
-                email = self.gmail_utils.get_email_content(email_id)
-                if not email:
-                    stats['errors'] += 1
-                    continue
+            print(f"🏷️  Processing {total_emails} emails...")
+            
+            # Create progress bar
+            with tqdm(total=total_emails, desc="Labeling emails", unit="email") as pbar:
+                for email_id in unlabeled:
+                    email = self.gmail_utils.get_email_content(email_id)
+                    if not email:
+                        stats['errors'] += 1
+                        pbar.update(1)
+                        continue
 
-                category = self._classify_email(email, prompt)
-                if category and not dry_run:
-                    if self._apply_label(email_id, category):
-                        stats['labeled'] += 1
+                    category = self._classify_email(email, prompt_template)
+                    if category and not dry_run:
+                        if self._apply_label(email_id, category):
+                            stats['labeled'] += 1
 
-                stats['processed'] += 1
+                    stats['processed'] += 1
+                    pbar.update(1)
+                    
+                    # Update progress bar description with current stats
+                    pbar.set_postfix(labeled=stats['labeled'], errors=stats['errors'])
 
             return stats
 
@@ -199,10 +222,12 @@ class GmailLabeler:
         categories = []
         for name, details in config['categories'].items():
             categories.append(f"{name}: {details['description']}")
-
-        return f"""
+        
+        categories_text = ' | '.join(categories)
+        
+        return f'''
         Categorize this email into EXACTLY ONE of these categories:
-        {' | '.join(categories)}
+        {categories_text}
 
         Rules:
         1. Choose exactly one category
@@ -210,29 +235,37 @@ class GmailLabeler:
         3. Be decisive - no explanations needed
 
         Email:
-        From: {{from}}
+        From: {{sender}}
         Subject: {{subject}}
         Body excerpt: {{body}}
 
         Return ONLY the category name, nothing else.
-        """
+        '''
 
     def _apply_label(self, email_id: str, category: str) -> bool:
         """Apply label to email"""
-        label_name = f"Smart/{category}"
-        label = self.gmail_utils.get_or_create_label(category, 'Smart')
-        if label:
-            return self.gmail_utils.apply_label(email_id, label['id'])
-        return False
+        try:
+            # Create the full label path under Smart Labels/category
+            label = self.gmail_utils.get_or_create_label(category, PARENT_LABEL)
+            if label:
+                return self.gmail_utils.apply_label(email_id, label['id'])
+            return False
+        except Exception as e:
+            print(f"Error applying label: {str(e)}")
+            return False
 
     def _delete_existing_labels(self) -> None:
         """Delete all existing Smart labels"""
-        labels = self.gmail_service.users().labels().list(userId='me').execute()
-        for label in labels.get('labels', []):
-            if label['name'].startswith('Smart/'):
-                self.gmail_service.users().labels().delete(
-                    userId='me', id=label['id']
-                ).execute()
+        try:
+            # Only delete child labels, keep the parent
+            labels = self.gmail_service.users().labels().list(userId='me').execute()
+            for label in labels.get('labels', []):
+                if label['name'].startswith(f"{PARENT_LABEL}/"):
+                    self.gmail_service.users().labels().delete(
+                        userId='me', id=label['id']
+                    ).execute()
+        except Exception as e:
+            print(f"Error deleting labels: {str(e)}")
 
     def _get_unlabeled_emails(self) -> list:
         """Get list of emails without Smart labels"""
@@ -240,7 +273,7 @@ class GmailLabeler:
         labeled = set()
         labels = self.gmail_service.users().labels().list(userId='me').execute()
         for label in labels.get('labels', []):
-            if label['name'].startswith('Smart/'):
+            if label['name'].startswith(f"{PARENT_LABEL}/"):
                 messages = self.gmail_utils.get_messages_with_label(label['id'])
                 labeled.update(messages)
 
@@ -250,17 +283,17 @@ class GmailLabeler:
         # Return unlabeled messages
         return list(all_messages - labeled)
 
-    def _classify_email(self, email: Dict, prompt: str) -> Optional[str]:
+    def _classify_email(self, email: Dict, prompt_template: str) -> Optional[str]:
         """Classify single email"""
         try:
-            formatted_prompt = prompt.format(
-                from_=email.get('from', 'Unknown'),
+            formatted_prompt = prompt_template.format(
+                sender=email.get('from', 'Unknown'),
                 subject=email.get('subject', 'No Subject'),
                 body=email.get('body', '')[:300]
             )
 
             response = self.openai.chat.completions.create(
-                model="gpt-4o",
+                model="gpt-4-0125-preview",
                 messages=[
                     {"role": "system", "content": "You are an email classifier. Return only the category name."},
                     {"role": "user", "content": formatted_prompt}
