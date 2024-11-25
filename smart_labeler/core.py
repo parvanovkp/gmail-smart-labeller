@@ -7,6 +7,7 @@ from typing import Dict, Optional
 from .utils.auth import GmailAuthenticator
 from .utils.gmail import GmailUtils
 from tqdm import tqdm
+from .logger import setup_logger
 
 CONFIG_DIR = Path(__file__).parent / 'config'
 CONFIG_PATH = CONFIG_DIR / 'categories.yaml'
@@ -15,12 +16,21 @@ PARENT_LABEL = "Smart Labels"
 class GmailLabeler:
     def __init__(self):
         """Initialize Gmail and OpenAI clients"""
-        load_dotenv()
+        # Set up logging first
+        self.user_config_dir = Path.home() / '.gmail-smart-labeler'
+        self.logger = setup_logger(self.user_config_dir)
+        
+        # Load .env from user config directory
+        env_path = self.user_config_dir / '.env'
+        load_dotenv(env_path)
         
         # Initialize OpenAI
         api_key = os.getenv('OPENAI_API_KEY')
         if not api_key:
-            raise ValueError("OPENAI_API_KEY not found in environment variables")
+            self.logger.critical("OpenAI API key not found. Please run 'gmail-smart-label configure' first.")
+            raise ValueError("OpenAI API key not found")
+        
+        self.logger.info("Initializing services...")
         self.openai = OpenAI(api_key=api_key)
         
         # Initialize Gmail
@@ -33,28 +43,43 @@ class GmailLabeler:
         
         # Ensure parent label exists
         self._ensure_parent_label_exists()
+        self.logger.info("Initialization complete!")
 
     def _ensure_parent_label_exists(self):
         """Create the parent Smart Labels label if it doesn't exist"""
-        self.gmail_utils.get_or_create_label(PARENT_LABEL)
+        try:
+            self.logger.debug(f"Ensuring parent label '{PARENT_LABEL}' exists")
+            self.gmail_utils.get_or_create_label(PARENT_LABEL)
+        except Exception as e:
+            self.logger.error(f"Error creating parent label: {str(e)}")
+            raise
 
     def analyze(self) -> None:
         """Analyze inbox and generate category suggestions"""
         try:
+            self.logger.info("Starting inbox analysis...")
+            
             # Delete existing Smart labels if any
             if CONFIG_PATH.exists():
+                self.logger.info("Deleting existing Smart labels")
                 self._delete_existing_labels()
             
             # Analyze inbox patterns
+            self.logger.info("Analyzing inbox patterns...")
             patterns = self._analyze_patterns()
             
             # Generate categories using OpenAI
+            self.logger.info("Generating categories using OpenAI...")
             categories = self._generate_categories(patterns)
             
             # Save to YAML
+            self.logger.info("Saving configuration...")
             self._save_config(categories)
             
+            self.logger.info("Analysis completed successfully")
+            
         except Exception as e:
+            self.logger.error(f"Analysis failed: {str(e)}", exc_info=True)
             raise Exception(f"Analysis failed: {str(e)}")
 
     def _analyze_patterns(self) -> Dict:
@@ -67,8 +92,8 @@ class GmailLabeler:
         
         # Get sample of recent emails
         messages = self.gmail_utils.get_all_messages(max_results=500)
+        self.logger.info(f"Analyzing patterns from {len(messages)} emails")
         
-        print("📊 Analyzing email patterns...")
         for msg_id in tqdm(messages, desc="Processing emails", unit="email"):
             email = self.gmail_utils.get_email_content(msg_id)
             if email:
@@ -109,10 +134,12 @@ class GmailLabeler:
         for key in patterns:
             patterns[key] = dict(sorted(patterns[key].items(), key=lambda x: x[1], reverse=True)[:10])
         
+        self.logger.debug(f"Pattern analysis results: {patterns}")
         return patterns
 
     def _generate_categories(self, patterns: Dict) -> Dict:
         """Generate category suggestions using OpenAI"""
+        self.logger.info("Generating category suggestions")
         prompt = f"""
         Analyze these email patterns and suggest 6-8 clear, distinct categories.
         Each category should be simple and non-overlapping.
@@ -134,6 +161,7 @@ class GmailLabeler:
         """
 
         try:
+            self.logger.debug("Sending request to OpenAI")
             response = self.openai.chat.completions.create(
                 model="gpt-4-0125-preview",
                 messages=[
@@ -149,29 +177,40 @@ class GmailLabeler:
             if content.startswith('```'):
                 content = '\n'.join(content.split('\n')[1:-1])
             
-            return yaml.safe_load(content)
+            categories = yaml.safe_load(content)
+            self.logger.info(f"Generated {len(categories.get('categories', {}))} categories")
+            return categories
         except yaml.YAMLError as e:
+            self.logger.error(f"Invalid YAML in OpenAI response: {str(e)}")
             raise Exception(f"Invalid YAML in response: {str(e)}")
         except Exception as e:
+            self.logger.error(f"Error generating categories: {str(e)}")
             raise Exception(f"Error generating categories: {str(e)}")
 
     def _save_config(self, categories: Dict) -> None:
         """Save categories to YAML config file"""
         try:
+            self.logger.info(f"Saving configuration to {CONFIG_PATH}")
             with open(CONFIG_PATH, 'w') as f:
                 yaml.safe_dump(categories, f, default_flow_style=False, sort_keys=False)
+            self.logger.info("Configuration saved successfully")
         except Exception as e:
+            self.logger.error(f"Failed to save config: {str(e)}")
             raise Exception(f"Failed to save config: {str(e)}")
 
     def label(self, dry_run: bool = False) -> Dict:
         """Label emails using current configuration"""
         if not CONFIG_PATH.exists():
+            self.logger.error("No configuration file found")
             raise FileNotFoundError("No configuration file found")
 
         try:
+            self.logger.info("Starting email labeling process")
+            
             # Load configuration
             with open(CONFIG_PATH, 'r') as f:
                 config = yaml.safe_load(f)
+            self.logger.info(f"Loaded {len(config.get('categories', {}))} categories from config")
 
             # Generate classification prompt
             prompt_template = self._generate_prompt(config)
@@ -181,7 +220,7 @@ class GmailLabeler:
             total_emails = len(unlabeled)
 
             if total_emails == 0:
-                print("✨ No new emails to label!")
+                self.logger.info("No new emails to label")
                 return {"processed": 0, "labeled": 0, "errors": 0}
 
             stats = {
@@ -190,14 +229,17 @@ class GmailLabeler:
                 'errors': 0
             }
 
-            print(f"🏷️  Processing {total_emails} emails...")
+            if dry_run:
+                self.logger.info("Running in dry-run mode")
             
-            # Create progress bar
+            self.logger.info(f"Processing {total_emails} emails...")
+            
             with tqdm(total=total_emails, desc="Labeling emails", unit="email") as pbar:
                 for email_id in unlabeled:
                     email = self.gmail_utils.get_email_content(email_id)
                     if not email:
                         stats['errors'] += 1
+                        self.logger.warning(f"Could not fetch email content for ID: {email_id}")
                         pbar.update(1)
                         continue
 
@@ -205,20 +247,25 @@ class GmailLabeler:
                     if category and not dry_run:
                         if self._apply_label(email_id, category):
                             stats['labeled'] += 1
+                            self.logger.debug(f"Applied category '{category}' to email {email_id}")
+                        else:
+                            self.logger.warning(f"Failed to apply category '{category}' to email {email_id}")
 
                     stats['processed'] += 1
                     pbar.update(1)
-                    
-                    # Update progress bar description with current stats
                     pbar.set_postfix(labeled=stats['labeled'], errors=stats['errors'])
 
+            self.logger.info(f"Labeling complete. Processed: {stats['processed']}, "
+                           f"Labeled: {stats['labeled']}, Errors: {stats['errors']}")
             return stats
 
         except Exception as e:
+            self.logger.error(f"Labeling failed: {str(e)}", exc_info=True)
             raise Exception(f"Labeling failed: {str(e)}")
 
     def _generate_prompt(self, config: Dict) -> str:
         """Generate efficient classification prompt from config"""
+        self.logger.debug("Generating classification prompt")
         categories = []
         for name, details in config['categories'].items():
             categories.append(f"{name}: {details['description']}")
@@ -245,43 +292,55 @@ class GmailLabeler:
     def _apply_label(self, email_id: str, category: str) -> bool:
         """Apply label to email"""
         try:
+            self.logger.debug(f"Applying category '{category}' to email {email_id}")
             # Create the full label path under Smart Labels/category
             label = self.gmail_utils.get_or_create_label(category, PARENT_LABEL)
             if label:
                 return self.gmail_utils.apply_label(email_id, label['id'])
             return False
         except Exception as e:
-            print(f"Error applying label: {str(e)}")
+            self.logger.error(f"Error applying label: {str(e)}")
             return False
 
     def _delete_existing_labels(self) -> None:
         """Delete all existing Smart labels"""
         try:
+            self.logger.info("Deleting existing Smart labels")
             # Only delete child labels, keep the parent
             labels = self.gmail_service.users().labels().list(userId='me').execute()
             for label in labels.get('labels', []):
                 if label['name'].startswith(f"{PARENT_LABEL}/"):
+                    self.logger.debug(f"Deleting label: {label['name']}")
                     self.gmail_service.users().labels().delete(
                         userId='me', id=label['id']
                     ).execute()
+            self.logger.info("Existing labels deleted successfully")
         except Exception as e:
-            print(f"Error deleting labels: {str(e)}")
+            self.logger.error(f"Error deleting labels: {str(e)}")
+            raise
 
     def _get_unlabeled_emails(self) -> list:
         """Get list of emails without Smart labels"""
-        # Get all emails with Smart labels
-        labeled = set()
-        labels = self.gmail_service.users().labels().list(userId='me').execute()
-        for label in labels.get('labels', []):
-            if label['name'].startswith(f"{PARENT_LABEL}/"):
-                messages = self.gmail_utils.get_messages_with_label(label['id'])
-                labeled.update(messages)
+        try:
+            self.logger.debug("Getting list of unlabeled emails")
+            # Get all emails with Smart labels
+            labeled = set()
+            labels = self.gmail_service.users().labels().list(userId='me').execute()
+            for label in labels.get('labels', []):
+                if label['name'].startswith(f"{PARENT_LABEL}/"):
+                    messages = self.gmail_utils.get_messages_with_label(label['id'])
+                    labeled.update(messages)
 
-        # Get all inbox messages
-        all_messages = set(self.gmail_utils.get_all_messages(label_ids=['INBOX']))
-        
-        # Return unlabeled messages
-        return list(all_messages - labeled)
+            # Get all inbox messages
+            all_messages = set(self.gmail_utils.get_all_messages(label_ids=['INBOX']))
+            
+            # Get unlabeled messages
+            unlabeled = list(all_messages - labeled)
+            self.logger.debug(f"Found {len(unlabeled)} unlabeled emails")
+            return unlabeled
+        except Exception as e:
+            self.logger.error(f"Error getting unlabeled emails: {str(e)}")
+            raise
 
     def _classify_email(self, email: Dict, prompt_template: str) -> Optional[str]:
         """Classify single email"""
@@ -302,8 +361,10 @@ class GmailLabeler:
                 max_tokens=10
             )
 
-            return response.choices[0].message.content.strip()
+            category = response.choices[0].message.content.strip()
+            self.logger.debug(f"Classified email as: {category}")
+            return category
 
         except Exception as e:
-            print(f"Classification error: {str(e)}")
+            self.logger.error(f"Classification error: {str(e)}")
             return None
