@@ -201,38 +201,20 @@ class GmailLabeler:
     def label(self, dry_run: bool = False) -> Dict:
         """Label emails using current configuration"""
         if not CONFIG_PATH.exists():
-            self.logger.error("No configuration file found")
             raise FileNotFoundError("No configuration file found")
 
         try:
-            self.logger.info("Starting email labeling process")
-            
-            # Load configuration
             with open(CONFIG_PATH, 'r') as f:
                 config = yaml.safe_load(f)
-            self.logger.info(f"Loaded {len(config.get('categories', {}))} categories from config")
 
-            # Generate classification prompt
             prompt_template = self._generate_prompt(config)
-
-            # Get unlabeled emails
             unlabeled = self._get_unlabeled_emails()
             total_emails = len(unlabeled)
 
             if total_emails == 0:
-                self.logger.info("No new emails to label")
                 return {"processed": 0, "labeled": 0, "errors": 0}
 
-            stats = {
-                'processed': 0,
-                'labeled': 0,
-                'errors': 0
-            }
-
-            if dry_run:
-                self.logger.info("Running in dry-run mode")
-            
-            self.logger.info(f"Processing {total_emails} emails...")
+            stats = {'processed': 0, 'labeled': 0, 'errors': 0}
             
             with tqdm(total=total_emails, desc="Labeling emails", unit="email") as pbar:
                 for email_id in unlabeled:
@@ -247,21 +229,16 @@ class GmailLabeler:
                     if category and not dry_run:
                         if self._apply_label(email_id, category):
                             stats['labeled'] += 1
-                            self.logger.debug(f"Applied category '{category}' to email {email_id}")
-                        else:
-                            self.logger.warning(f"Failed to apply category '{category}' to email {email_id}")
 
                     stats['processed'] += 1
                     pbar.update(1)
                     pbar.set_postfix(labeled=stats['labeled'], errors=stats['errors'])
 
-            self.logger.info(f"Labeling complete. Processed: {stats['processed']}, "
-                           f"Labeled: {stats['labeled']}, Errors: {stats['errors']}")
             return stats
 
         except Exception as e:
             self.logger.error(f"Labeling failed: {str(e)}", exc_info=True)
-            raise Exception(f"Labeling failed: {str(e)}")
+            raise
 
     def _generate_prompt(self, config: Dict) -> str:
         """Generate efficient classification prompt from config"""
